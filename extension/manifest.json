@@ -6,7 +6,7 @@
   "background": {
     "service_worker": "background/background.js"
   },
-  "permissions": ["storage", "alarms"],
+  "permissions": ["storage", "alarms", "history"],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [
     {
