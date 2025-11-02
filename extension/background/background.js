@@ -3,6 +3,7 @@ const browserApi = typeof browser !== 'undefined' ? browser : chrome;
 const ACTION_QUEUE_KEY = 'personalizeActionQueue';
 const PAGE_STATS_KEY = 'pageStats';
 const PAGE_PREFERENCES_KEY = 'pagePreferences';
+const DEBUG_MODE_KEY = 'personalizeDebugMode';
 
 const DATABASE_NAME = 'personalize-extension';
 const DATABASE_VERSION = 1;
@@ -15,16 +16,72 @@ const taskQueue = [];
 let processing = false;
 let dbPromise;
 
+const logger = (() => {
+  const prefix = '[personalize]';
+  let debugMode = false;
+
+  function output(method, ...args) {
+    console[method](prefix, ...args);
+  }
+
+  return {
+    setDebugMode(value) {
+      debugMode = Boolean(value);
+      output('info', `Debug mode ${debugMode ? 'enabled' : 'disabled'}`);
+    },
+    isDebugEnabled() {
+      return debugMode;
+    },
+    debug(...args) {
+      if (debugMode) {
+        output('debug', ...args);
+      }
+    },
+    info(...args) {
+      output('info', ...args);
+    },
+    warn(...args) {
+      output('warn', ...args);
+    },
+    error(...args) {
+      output('error', ...args);
+    }
+  };
+})();
+
+async function initializeDebugMode() {
+  try {
+    const stored = await browserApi.storage.local.get({ [DEBUG_MODE_KEY]: false });
+    logger.setDebugMode(stored[DEBUG_MODE_KEY]);
+  } catch (error) {
+    logger.warn('Failed to initialize debug mode. Falling back to disabled state.', error);
+    logger.setDebugMode(false);
+  }
+}
+
+initializeDebugMode();
+
+if (browserApi.storage?.onChanged) {
+  browserApi.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === 'local' && Object.prototype.hasOwnProperty.call(changes, DEBUG_MODE_KEY)) {
+      logger.setDebugMode(changes[DEBUG_MODE_KEY]?.newValue);
+    }
+  });
+}
+
 function openDatabase() {
   if (dbPromise) {
+    logger.debug('Reusing existing IndexedDB connection');
     return dbPromise;
   }
 
+  logger.debug('Opening IndexedDB connection');
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
 
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
+      logger.info('Applying IndexedDB schema upgrade to version', DATABASE_VERSION);
       if (!db.objectStoreNames.contains(PAGE_FEATURE_STORE)) {
         const pageStore = db.createObjectStore(PAGE_FEATURE_STORE, {
           keyPath: 'id'
@@ -47,10 +104,12 @@ function openDatabase() {
     };
 
     request.onsuccess = () => {
+      logger.debug('IndexedDB connection established');
       resolve(request.result);
     };
 
     request.onerror = () => {
+      logger.error('IndexedDB connection failed', request.error);
       reject(request.error);
     };
   });
@@ -69,14 +128,21 @@ function withStore(storeName, mode, handler) {
         try {
           handlerResult = handler(store, tx);
         } catch (error) {
+          logger.error('withStore handler threw synchronously', error);
           reject(error);
           tx.abort();
           return;
         }
 
         tx.oncomplete = () => resolve(handlerResult);
-        tx.onerror = () => reject(tx.error);
-        tx.onabort = () => reject(tx.error);
+        tx.onerror = () => {
+          logger.error('Transaction failed', tx.error);
+          reject(tx.error);
+        };
+        tx.onabort = () => {
+          logger.warn('Transaction aborted', tx.error);
+          reject(tx.error);
+        };
       })
   );
 }
@@ -96,6 +162,7 @@ async function savePageFeature(record) {
     store.put(sanitizedRecord);
   });
 
+  logger.debug('Saved page feature', sanitizedRecord.id, sanitizedRecord.source);
   return sanitizedRecord.id;
 }
 
@@ -110,6 +177,7 @@ async function saveInteractionLog(record) {
     store.put(sanitizedRecord);
   });
 
+  logger.debug('Saved interaction log', sanitizedRecord.id, sanitizedRecord.actionType);
   return sanitizedRecord.id;
 }
 
@@ -155,6 +223,76 @@ function sanitizeMeta(meta) {
   }
 
   return sanitized;
+}
+
+function sanitizeContextMetrics(context) {
+  const defaults = {
+    characterCount: 0,
+    paragraphCount: 0,
+    headingCount: 0,
+    imageCount: 0
+  };
+
+  const sanitized = { ...defaults };
+
+  if (context && typeof context === 'object') {
+    for (const key of Object.keys(defaults)) {
+      const incoming = context[key];
+      if (typeof incoming === 'number' && Number.isFinite(incoming)) {
+        sanitized[key] = incoming;
+      }
+    }
+  }
+
+  return sanitized;
+}
+
+function validatePageAnalysisPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return { valid: false, reason: 'Missing payload' };
+  }
+
+  if (typeof payload.url !== 'string' || payload.url.trim() === '') {
+    return { valid: false, reason: 'URL is required' };
+  }
+
+  const sanitized = {
+    ...payload,
+    url: payload.url,
+    title: typeof payload.title === 'string' ? payload.title : '',
+    source: payload.source === 'history' ? 'history' : 'live',
+    extractedAt: typeof payload.extractedAt === 'number' ? payload.extractedAt : Date.now(),
+    visualTrend: typeof payload.visualTrend === 'string' ? payload.visualTrend : '',
+    layoutHighlights: typeof payload.layoutHighlights === 'string' ? payload.layoutHighlights : '',
+    textSample: typeof payload.textSample === 'string' ? payload.textSample : '',
+    viewportSummary: typeof payload.viewportSummary === 'string' ? payload.viewportSummary : ''
+  };
+
+  sanitized.context = sanitizeContextMetrics(payload.context);
+
+  return { valid: true, sanitized };
+}
+
+function validateUserActionPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return { valid: false, reason: 'Missing payload' };
+  }
+
+  if (typeof payload.url !== 'string' || payload.url.trim() === '') {
+    return { valid: false, reason: 'URL is required' };
+  }
+
+  if (typeof payload.type !== 'string' || payload.type.trim() === '') {
+    return { valid: false, reason: 'Action type is required' };
+  }
+
+  return {
+    valid: true,
+    sanitized: {
+      ...payload,
+      meta: sanitizeMeta(payload.meta)
+    }
+  };
 }
 
 function summarizeStructureMetrics(metrics) {
@@ -279,14 +417,14 @@ async function analyzeHistoryEntry(historyItem) {
       };
     }
   } catch (error) {
-    console.warn('Failed to fetch or parse history page for analysis', url, error);
+    logger.warn('Failed to fetch or parse history page for analysis', url, error);
   }
 
   const origin = (() => {
     try {
       return new URL(url).origin;
     } catch (error) {
-      console.warn('Unable to resolve origin for url', url, error);
+      logger.warn('Unable to resolve origin for url', url, error);
       return url;
     }
   })();
@@ -312,7 +450,7 @@ async function analyzeHistoryEntry(historyItem) {
       layoutHighlights
     });
   } catch (error) {
-    console.warn('LLM summary failed for history entry', url, error);
+    logger.warn('LLM summary failed for history entry', url, error);
   }
 
   const record = {
@@ -341,7 +479,7 @@ async function runGpt5VisualSummary({ title, bodyText, visualTrend, layoutHighli
     const storage = await browserApi.storage.local.get({ [OPENAI_KEY_STORAGE_KEY]: null });
     apiKey = storage[OPENAI_KEY_STORAGE_KEY];
   } catch (error) {
-    console.warn('Failed to load OpenAI API key', error);
+    logger.warn('Failed to load OpenAI API key', error);
   }
 
   if (!apiKey) {
@@ -387,14 +525,14 @@ async function runGpt5VisualSummary({ title, bodyText, visualTrend, layoutHighli
       raw: JSON.stringify(result)
     };
   } catch (error) {
-    console.warn('OpenAI visual summary failed', error);
+    logger.warn('OpenAI visual summary failed', error);
     return null;
   }
 }
 
 async function analyzeRecentHistory() {
   if (!browserApi.history || typeof browserApi.history.search !== 'function') {
-    console.warn('History API unavailable');
+    logger.warn('History API unavailable');
     return;
   }
 
@@ -427,39 +565,70 @@ async function analyzeRecentHistory() {
 
     await Promise.allSettled(analyses);
   } catch (error) {
-    console.error('Failed to analyze recent history', error);
+    logger.error('Failed to analyze recent history', error);
   }
 }
 
+async function buildDiagnosticsSnapshot() {
+  const storage = await browserApi.storage.local.get({
+    [PAGE_STATS_KEY]: {},
+    [PAGE_PREFERENCES_KEY]: {}
+  });
+
+  const stats = storage[PAGE_STATS_KEY];
+  const preferences = storage[PAGE_PREFERENCES_KEY];
+
+  const snapshot = {
+    queueLength: taskQueue.length,
+    processing,
+    debugMode: logger.isDebugEnabled(),
+    trackedPages: Object.keys(stats).length,
+    pagesWithPreferences: Object.keys(preferences).length,
+    timestamp: Date.now()
+  };
+
+  logger.debug('Diagnostics snapshot created', snapshot);
+  return snapshot;
+}
+
+async function setDebugModePreference(enabled) {
+  await browserApi.storage.local.set({ [DEBUG_MODE_KEY]: Boolean(enabled) });
+  logger.info('Debug mode preference stored', enabled);
+}
+
 async function handlePageAnalysis(analysis) {
-  if (!analysis || !analysis.url) {
+  const { valid, sanitized, reason } = validatePageAnalysisPayload(analysis);
+  if (!valid) {
+    logger.warn('Discarded page analysis payload', reason, analysis);
     return;
   }
 
   const origin = (() => {
     try {
-      return new URL(analysis.url).origin;
+      return new URL(sanitized.url).origin;
     } catch (error) {
-      return analysis.url;
+      logger.warn('Fallback origin used for analysis URL', sanitized.url, error);
+      return sanitized.url;
     }
   })();
 
   const record = {
-    id: analysis.id,
-    url: analysis.url,
+    id: sanitized.id,
+    url: sanitized.url,
     origin,
-    source: analysis.source || 'live',
-    title: analysis.title,
-    extractedAt: analysis.extractedAt || Date.now(),
-    visualTrend: analysis.visualTrend,
-    layoutHighlights: analysis.layoutHighlights,
-    category: analysis.category,
-    textSample: analysis.textSample,
-    viewportSummary: analysis.viewportSummary,
-    context: analysis.context,
-    rawLLMResponse: analysis.rawLLMResponse
+    source: sanitized.source,
+    title: sanitized.title,
+    extractedAt: sanitized.extractedAt,
+    visualTrend: sanitized.visualTrend,
+    layoutHighlights: sanitized.layoutHighlights,
+    category: sanitized.category,
+    textSample: sanitized.textSample,
+    viewportSummary: sanitized.viewportSummary,
+    context: sanitized.context,
+    rawLLMResponse: sanitized.rawLLMResponse
   };
 
+  logger.info('Persisting page analysis', { url: record.url, source: record.source, category: record.category });
   await savePageFeature(record);
 }
 
@@ -473,6 +642,7 @@ async function recordInteraction(action) {
     try {
       return new URL(url).origin;
     } catch (error) {
+      logger.warn('Fallback origin used for interaction URL', url, error);
       return url;
     }
   })();
@@ -487,27 +657,36 @@ async function recordInteraction(action) {
 }
 
 function persistQueueSnapshot() {
-  browserApi.storage.local.set({ [ACTION_QUEUE_KEY]: [...taskQueue] }).catch((error) => {
-    console.error('Failed to persist queue snapshot', error);
-  });
+  browserApi.storage.local
+    .set({ [ACTION_QUEUE_KEY]: [...taskQueue] })
+    .then(() => {
+      logger.debug('Queue snapshot persisted', taskQueue.length);
+    })
+    .catch((error) => {
+      logger.error('Failed to persist queue snapshot', error);
+    });
 }
 
 function enqueueTask(task, options = { persist: true }) {
+  logger.debug('Enqueue task', task.type, { persist: options.persist });
   taskQueue.push(task);
   if (options.persist) {
     persistQueueSnapshot();
   }
+  logger.debug('Queue length', taskQueue.length);
   processQueue();
 }
 
 async function processQueue() {
   if (processing || taskQueue.length === 0) {
+    logger.debug('Skipping queue processing', { processing, length: taskQueue.length });
     return;
   }
 
   processing = true;
   const task = taskQueue.shift();
   persistQueueSnapshot();
+  logger.debug('Processing task', task.type, 'Remaining queue length', taskQueue.length);
 
   try {
     switch (task.type) {
@@ -521,12 +700,13 @@ async function processQueue() {
         await handlePageAnalysis(task.payload);
         break;
       default:
-        console.warn('Unknown task type received', task.type);
+        logger.warn('Unknown task type received', task.type);
     }
   } catch (error) {
-    console.error('Failed to process task', task, error);
+    logger.error('Failed to process task', task, error);
   } finally {
     processing = false;
+    logger.debug('Task finished', task.type);
     if (taskQueue.length > 0) {
       processQueue();
     }
@@ -534,7 +714,13 @@ async function processQueue() {
 }
 
 async function handleUserAction(action) {
-  const { url, type, meta } = action;
+  const { valid, sanitized, reason } = validateUserActionPayload(action);
+  if (!valid) {
+    logger.warn('Discarded user action payload', reason, action);
+    return;
+  }
+
+  const { url, type, meta } = sanitized;
   const storage = await browserApi.storage.local.get({
     [PAGE_STATS_KEY]: {},
     [PAGE_PREFERENCES_KEY]: {}
@@ -542,7 +728,13 @@ async function handleUserAction(action) {
 
   const stats = storage[PAGE_STATS_KEY];
   const preferences = storage[PAGE_PREFERENCES_KEY];
-  const pageKey = new URL(url).origin;
+  let pageKey;
+  try {
+    pageKey = new URL(url).origin;
+  } catch (error) {
+    logger.warn('Failed to derive page key from URL, using raw value', url, error);
+    pageKey = url;
+  }
 
   if (!stats[pageKey]) {
     stats[pageKey] = { visits: 0, lastInteraction: null };
@@ -568,6 +760,7 @@ async function handleUserAction(action) {
     [PAGE_PREFERENCES_KEY]: preferences
   });
 
+  logger.info('Recorded user action', { pageKey, type, visits: stats[pageKey].visits });
   await recordInteraction({ url, type, meta });
 }
 
@@ -620,15 +813,39 @@ browserApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'GET_PERSONALIZATION': {
       (async () => {
         const storage = await browserApi.storage.local.get({ [PAGE_PREFERENCES_KEY]: {} });
-        const pageKey = new URL(message.url).origin;
+        let pageKey;
+        try {
+          pageKey = new URL(message.url).origin;
+        } catch (error) {
+          logger.warn('Failed to derive personalization key from URL', message.url, error);
+          pageKey = message.url;
+        }
         sendResponse({
           preferences: storage[PAGE_PREFERENCES_KEY][pageKey] || null
         });
       })();
       return true;
     }
+    case 'GET_DEBUG_MODE': {
+      sendResponse({ enabled: logger.isDebugEnabled() });
+      break;
+    }
+    case 'SET_DEBUG_MODE': {
+      (async () => {
+        await setDebugModePreference(Boolean(message.enabled));
+        sendResponse({ enabled: Boolean(message.enabled) });
+      })();
+      return true;
+    }
+    case 'GET_DIAGNOSTICS': {
+      (async () => {
+        const snapshot = await buildDiagnosticsSnapshot();
+        sendResponse({ snapshot });
+      })();
+      return true;
+    }
     default:
-      console.warn('Unhandled message type', message.type);
+      logger.warn('Unhandled message type', message.type);
   }
 
   return undefined;
