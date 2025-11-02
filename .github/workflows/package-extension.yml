@@ -1,0 +1,23 @@
+name: Package Extension
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create distribution archive
+        run: |
+          zip -r personalize-extension.zip extension
+
+      - name: Upload packaged extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: personalize-extension
+          path: personalize-extension.zip
