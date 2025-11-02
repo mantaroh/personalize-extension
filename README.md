@@ -30,6 +30,34 @@ extension/
 1. Firefox を開き、 `about:debugging#/runtime/this-firefox` を表示します。
 2. 「一時的なアドオンを読み込む」をクリックし、`extension/manifest.json` を指定します。
 
+## CI で生成された Zip アーカイブの利用手順
+
+CI から配布される Zip ファイルには `manifest.json` を含む `extension/` ディレクトリ一式が格納されています。以下の手順で展開し、ブラウザごとに読み込んでください。
+
+### 事前準備（共通）
+1. CI で生成された Zip ファイルをダウンロードします。
+2. Zip を展開し、`manifest.json` が直下に存在するフォルダ構成のまま保持します（移動や削除を行うと読み込み済みの拡張機能が無効化されるため注意してください）。
+
+### Google Chrome
+1. Chrome で `chrome://extensions` を開きます。
+2. 右上の「デベロッパーモード」をオンにします。
+3. 「パッケージ化されていない拡張機能を読み込む」をクリックし、Zip を展開したフォルダ（`manifest.json` が直下にあるディレクトリ）を選択します。
+
+### Mozilla Firefox
+1. Firefox で `about:debugging#/runtime/this-firefox` を開きます。
+2. 「一時的なアドオンを読み込む」をクリックし、Zip から展開したフォルダ内の `manifest.json` を指定します。
+3. 一時アドオンとして読み込まれるため、ブラウザ再起動後に継続利用したい場合は `web-ext` などで署名パッケージ化するか、再度読み込みを実施してください。
+
+### Microsoft Edge
+- Chromium ベースのブラウザのため、基本的には Chrome と同じ手順で読み込めます。
+  1. Edge で `edge://extensions` を開き、左下の「デベロッパー モード」をオンにします。
+  2. 「展開されていない拡張機能を読み込む」をクリックし、Zip を展開したフォルダを指定します。
+- CI で署名済みパッケージ（`.crx` など）を配布する運用を行う場合は、企業ポリシーや Edge アドオン ストア経由での配布も検討してください。
+
+### Apple Safari
+- Safari では WebExtension をそのまま読み込むことができません。Zip を展開した後、Xcode の「Convert Web Extension」機能を利用して Safari App Extension プロジェクトを生成し、署名付きでビルドする必要があります。
+- テスト目的であれば、Xcode から Safari を実行し、開発メニューを有効化して動作確認する方法が簡便です。
+
 ## 今後の拡張
 
 - ユーザーごとの詳細な嗜好分析の実装
