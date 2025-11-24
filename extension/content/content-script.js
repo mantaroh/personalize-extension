@@ -1,6 +1,220 @@
 const browserApi = typeof browser !== 'undefined' ? browser : chrome;
+const DEBUG_MODE_KEY = 'personalizeDebugMode';
+
+const logger = (() => {
+  const prefix = '[personalize]';
+  let debugMode = false;
+
+  function output(method, ...args) {
+    console[method](prefix, ...args);
+  }
+
+  return {
+    setDebugMode(value) {
+      debugMode = Boolean(value);
+      output('info', `Content debug mode ${debugMode ? 'enabled' : 'disabled'}`);
+    },
+    isDebugEnabled() {
+      return debugMode;
+    },
+    debug(...args) {
+      if (debugMode) {
+        output('debug', ...args);
+      }
+    },
+    info(...args) {
+      output('info', ...args);
+    },
+    warn(...args) {
+      output('warn', ...args);
+    },
+    error(...args) {
+      output('error', ...args);
+    }
+  };
+})();
+
+const debugState = {
+  enabled: false
+};
+
+let debugIndicator;
+
+function ensureDebugIndicator() {
+  if (!debugState.enabled || debugIndicator) {
+    return debugIndicator;
+  }
+
+  if (!document.body) {
+    return null;
+  }
+
+  debugIndicator = document.createElement('div');
+  debugIndicator.setAttribute('data-personalize-debug-indicator', 'true');
+  Object.assign(debugIndicator.style, {
+    position: 'fixed',
+    top: '12px',
+    right: '12px',
+    zIndex: 2147483647,
+    padding: '8px 12px',
+    backgroundColor: 'rgba(17, 24, 39, 0.75)',
+    color: '#f9fafb',
+    fontSize: '12px',
+    fontFamily: 'system-ui, sans-serif',
+    borderRadius: '6px',
+    boxShadow: '0 4px 12px rgba(0, 0, 0, 0.35)',
+    pointerEvents: 'none'
+  });
+  debugIndicator.textContent = 'Personalize extension: デバッグ情報待機中';
+  document.body.appendChild(debugIndicator);
+  return debugIndicator;
+}
+
+function updateDebugIndicator(message) {
+  if (!debugState.enabled) {
+    return;
+  }
+
+  const indicator = ensureDebugIndicator();
+  if (!indicator) {
+    return;
+  }
+
+  const timestamp = new Date().toLocaleTimeString();
+  indicator.textContent = `${timestamp} ${message}`;
+}
+
+async function refreshDiagnostics(reason) {
+  if (!debugState.enabled) {
+    return;
+  }
+
+  try {
+    const response = await browserApi.runtime.sendMessage({ type: 'GET_DIAGNOSTICS' });
+    if (response?.snapshot) {
+      logger.debug('Diagnostics snapshot', reason, response.snapshot);
+      updateDebugIndicator(`${reason}: キュー ${response.snapshot.queueLength}, ページ ${response.snapshot.trackedPages}`);
+    }
+  } catch (error) {
+    logger.warn('Failed to fetch diagnostics snapshot', error);
+  }
+}
+
+async function initializeDebugState() {
+  try {
+    const response = await browserApi.runtime.sendMessage({ type: 'GET_DEBUG_MODE' });
+    const enabled = Boolean(response?.enabled);
+    debugState.enabled = enabled;
+    logger.setDebugMode(enabled);
+    if (enabled && document.body) {
+      ensureDebugIndicator();
+    }
+  } catch (error) {
+    logger.warn('Failed to initialize debug state', error);
+  }
+}
+
+if (browserApi.storage?.onChanged) {
+  browserApi.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !Object.prototype.hasOwnProperty.call(changes, DEBUG_MODE_KEY)) {
+      return;
+    }
+
+    const enabled = Boolean(changes[DEBUG_MODE_KEY]?.newValue);
+    debugState.enabled = enabled;
+    logger.setDebugMode(enabled);
+
+    if (!enabled && debugIndicator) {
+      debugIndicator.remove();
+      debugIndicator = undefined;
+    } else if (enabled && document.body) {
+      ensureDebugIndicator();
+    }
+  });
+}
+
+function markContentScriptActive() {
+  try {
+    document.documentElement.setAttribute('data-personalize-active', 'true');
+  } catch (error) {
+    logger.debug('Unable to set active marker', error);
+  }
+}
+
+function sanitizeNumeric(value, fallback = 0) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function sanitizeMetrics(metrics) {
+  if (!metrics || typeof metrics !== 'object') {
+    return {
+      dominantColor: 'transparent',
+      primaryFont: 'default',
+      baseFontSize: '16px',
+      textDensity: 0,
+      imageCount: 0,
+      paragraphCount: 0,
+      headingCount: 0,
+      averageParagraphLength: 0,
+      layoutStyle: '不明',
+      characterCount: 0,
+      textSample: ''
+    };
+  }
+
+  const sanitized = {
+    dominantColor: metrics.dominantColor || 'transparent',
+    primaryFont: metrics.primaryFont || 'default',
+    baseFontSize: metrics.baseFontSize || '16px',
+    textDensity: Math.min(Math.max(sanitizeNumeric(metrics.textDensity, 0), 0), 1),
+    imageCount: sanitizeNumeric(metrics.imageCount, 0),
+    paragraphCount: sanitizeNumeric(metrics.paragraphCount, 0),
+    headingCount: sanitizeNumeric(metrics.headingCount, 0),
+    averageParagraphLength: sanitizeNumeric(metrics.averageParagraphLength, 0),
+    layoutStyle: metrics.layoutStyle || '不明',
+    characterCount: sanitizeNumeric(metrics.characterCount, 0),
+    textSample: typeof metrics.textSample === 'string' ? metrics.textSample : ''
+  };
+
+  return sanitized;
+}
+
+function sanitizeContext(context = {}) {
+  return {
+    characterCount: sanitizeNumeric(context.characterCount, 0),
+    paragraphCount: sanitizeNumeric(context.paragraphCount, 0),
+    headingCount: sanitizeNumeric(context.headingCount, 0),
+    imageCount: sanitizeNumeric(context.imageCount, 0)
+  };
+}
+
+function sanitizePageAnalysisPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+
+  const sanitized = {
+    ...payload,
+    url: typeof payload.url === 'string' ? payload.url : window.location.href,
+    title: typeof payload.title === 'string' ? payload.title : document.title,
+    source: payload.source === 'history' ? 'history' : 'live',
+    extractedAt: typeof payload.extractedAt === 'number' ? payload.extractedAt : Date.now(),
+    visualTrend: typeof payload.visualTrend === 'string' ? payload.visualTrend : '',
+    layoutHighlights: typeof payload.layoutHighlights === 'string' ? payload.layoutHighlights : '',
+    textSample: typeof payload.textSample === 'string' ? payload.textSample : '',
+    viewportSummary: typeof payload.viewportSummary === 'string' ? payload.viewportSummary : ''
+  };
+
+  sanitized.context = sanitizeContext(payload.context);
+
+  return sanitized;
+}
 
 if (window.top === window.self) {
+  logger.info('Content script initializing', window.location.href);
+  markContentScriptActive();
+  initializeDebugState();
+
   const scrollInterval = 1500;
   const selectionInterval = 800;
   let lastScrollSent = 0;
@@ -29,16 +243,30 @@ if (window.top === window.self) {
 
   function captureAction(type, meta = {}) {
     try {
-      browserApi.runtime.sendMessage({
+      logger.debug('Dispatching user action', type, meta);
+      const message = {
         type: 'USER_ACTION',
         payload: {
           url: window.location.href,
           type,
           meta
         }
-      });
+      };
+      const result = browserApi.runtime.sendMessage(message);
+      if (result && typeof result.then === 'function') {
+        result
+          .then((response) => {
+            logger.debug('User action acknowledged', type, response);
+            refreshDiagnostics('ユーザー操作送信');
+          })
+          .catch((error) => {
+            logger.warn('User action message rejected', error);
+          });
+      } else {
+        refreshDiagnostics('ユーザー操作送信');
+      }
     } catch (error) {
-      console.error('Failed to send user action', error);
+      logger.error('Failed to send user action', error);
     }
   }
 
@@ -51,9 +279,11 @@ if (window.top === window.self) {
         });
         if (response?.preferences?.highlightColor) {
           applyHighlight(response.preferences.highlightColor);
+          logger.info('Applied personalization highlight', response.preferences.highlightColor);
+          refreshDiagnostics('ハイライト適用');
         }
       } catch (error) {
-        console.warn('Unable to load personalization preferences', error);
+        logger.warn('Unable to load personalization preferences', error);
       }
     }, 500);
   }
@@ -70,6 +300,11 @@ if (window.top === window.self) {
     target.setAttribute('data-personalize-highlight', 'true');
     target.style.outline = `3px solid ${color}`;
     target.style.outlineOffset = '4px';
+    target.dataset.personalizeHighlightColor = color;
+
+    if (debugState.enabled) {
+      updateDebugIndicator(`ハイライト色: ${color}`);
+    }
   }
 
   function extractViewportTextSample() {
@@ -130,7 +365,7 @@ if (window.top === window.self) {
       : characterCount;
     const layoutStyle = detectLayoutStyle();
 
-    return {
+    const metrics = {
       dominantColor: style.backgroundColor || 'transparent',
       primaryFont: style.fontFamily || 'default',
       baseFontSize: style.fontSize || '16px',
@@ -143,6 +378,13 @@ if (window.top === window.self) {
       characterCount,
       textSample: textContent.slice(0, 1000)
     };
+
+    const sanitizedMetrics = sanitizeMetrics(metrics);
+    if (logger.isDebugEnabled()) {
+      logger.debug('Collected page metrics', sanitizedMetrics);
+    }
+
+    return sanitizedMetrics;
   }
 
   function detectCategoryFromDocument(metrics) {
@@ -191,28 +433,49 @@ if (window.top === window.self) {
       const category = detectCategoryFromDocument(metrics);
       const viewportSummary = extractViewportTextSample();
 
-      await browserApi.runtime.sendMessage({
-        type: 'PAGE_ANALYSIS',
-        payload: {
-          url: window.location.href,
-          title: document.title,
-          source: 'live',
-          extractedAt: Date.now(),
-          visualTrend,
-          layoutHighlights,
-          category,
-          textSample: metrics.textSample,
-          viewportSummary,
-          context: {
-            characterCount: metrics.characterCount,
-            paragraphCount: metrics.paragraphCount,
-            headingCount: metrics.headingCount,
-            imageCount: metrics.imageCount
-          }
+      const payload = sanitizePageAnalysisPayload({
+        url: window.location.href,
+        title: document.title,
+        source: 'live',
+        extractedAt: Date.now(),
+        visualTrend,
+        layoutHighlights,
+        category,
+        textSample: metrics.textSample,
+        viewportSummary,
+        context: {
+          characterCount: metrics.characterCount,
+          paragraphCount: metrics.paragraphCount,
+          headingCount: metrics.headingCount,
+          imageCount: metrics.imageCount
         }
       });
+
+      if (!payload) {
+        logger.warn('Skipping page analysis due to invalid payload');
+        return;
+      }
+
+      logger.info('Dispatching page analysis');
+      logger.debug('Page analysis payload', payload);
+      const result = browserApi.runtime.sendMessage({
+        type: 'PAGE_ANALYSIS',
+        payload
+      });
+      if (result && typeof result.then === 'function') {
+        result
+          .then((response) => {
+            logger.debug('Page analysis acknowledged', response);
+            refreshDiagnostics('ページ解析送信');
+          })
+          .catch((error) => {
+            logger.warn('Page analysis message rejected', error);
+          });
+      } else {
+        refreshDiagnostics('ページ解析送信');
+      }
     } catch (error) {
-      console.warn('Failed to send page analysis', error);
+      logger.warn('Failed to send page analysis', error);
     }
   }
 
@@ -293,6 +556,10 @@ if (window.top === window.self) {
   }
 
   document.addEventListener('DOMContentLoaded', () => {
+    markContentScriptActive();
+    if (debugState.enabled) {
+      ensureDebugIndicator();
+    }
     schedulePersonalization();
     sendPageAnalysis();
   });
