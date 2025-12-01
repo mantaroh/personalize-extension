@@ -387,6 +387,23 @@ if (window.top === window.self) {
     return sanitizedMetrics;
   }
 
+  function buildCurrentPageSnapshot() {
+    const metrics = collectPageMetrics();
+    if (!metrics) {
+      return null;
+    }
+
+    return {
+      url: window.location.href,
+      title: document.title,
+      metrics,
+      visualTrend: buildVisualTrend(metrics),
+      layoutHighlights: buildLayoutHighlights(metrics),
+      viewportSummary: extractViewportTextSample(),
+      category: detectCategoryFromDocument(metrics)
+    };
+  }
+
   function detectCategoryFromDocument(metrics) {
     const title = document.title || '';
     const text = metrics.textSample || '';
@@ -585,4 +602,35 @@ if (window.top === window.self) {
 
   schedulePersonalization();
   sendPageAnalysis();
+
+  browserApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === 'REQUEST_PAGE_SNAPSHOT') {
+      const snapshot = buildCurrentPageSnapshot();
+      sendResponse({ snapshot });
+      return true;
+    }
+
+    if (!message || message.type !== 'APPLY_PERSONALIZATION_NOW') {
+      return;
+    }
+
+    if (debugState.enabled) {
+      logger.debug('Toolbar personalization request received', message.preferences);
+    }
+
+    const highlightColor =
+      message.customization?.highlightColor || message.preferences?.highlightColor;
+
+    if (message.customization?.notes && debugState.enabled) {
+      logger.debug('LLM toolbar notes', message.customization.notes, {
+        history: message.customizationHistory
+      });
+    }
+
+    if (highlightColor) {
+      applyHighlight(highlightColor);
+    } else {
+      schedulePersonalization();
+    }
+  });
 }

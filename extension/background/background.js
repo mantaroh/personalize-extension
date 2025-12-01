@@ -9,7 +9,7 @@ const DATABASE_NAME = 'personalize-extension';
 const DATABASE_VERSION = 1;
 const PAGE_FEATURE_STORE = 'pageFeatures';
 const INTERACTION_STORE = 'interactionLogs';
-const OPENAI_KEY_STORAGE_KEY = 'personalizeOpenAiKey';
+const OPENAI_KEY_STORAGE_KEY = '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';
 const OPENAI_MODEL_NAME = 'gpt-5.0-multimodal-preview';
 
 const taskQueue = [];
@@ -295,6 +295,19 @@ function validateUserActionPayload(payload) {
   };
 }
 
+const CATEGORY_KEYWORDS = {
+  news: ['news', 'breaking', 'press', 'headline', '記事', 'ニュース'],
+  shopping: ['shop', 'cart', 'buy', 'sale', '商品', '購入', '通販'],
+  social: ['profile', 'followers', 'comment', 'post', 'sns', 'ソーシャル', 'tweet'],
+  video: ['video', 'watch', 'stream', 'movie', '配信', '動画'],
+  reference: ['wiki', 'reference', 'documentation', 'guide', 'faq', 'ヘルプ'],
+  developer: ['code', 'developer', 'api', 'github', 'プログラミング', '技術'],
+  entertainment: ['music', 'game', 'anime', '漫画', 'entertainment', 'ライブ'],
+  finance: ['stock', 'market', 'finance', 'bank', '投資', '金融']
+};
+
+const CATEGORY_NAMES = Object.keys(CATEGORY_KEYWORDS);
+
 function summarizeStructureMetrics(metrics) {
   const parts = [];
   if (typeof metrics.headingCount === 'number') {
@@ -317,17 +330,6 @@ function summarizeStructureMetrics(metrics) {
 }
 
 function detectCategoryFromText(title, bodyText) {
-  const CATEGORY_KEYWORDS = {
-    news: ['news', 'breaking', 'press', 'headline', '記事', 'ニュース'],
-    shopping: ['shop', 'cart', 'buy', 'sale', '商品', '購入', '通販'],
-    social: ['profile', 'followers', 'comment', 'post', 'sns', 'ソーシャル', 'tweet'],
-    video: ['video', 'watch', 'stream', 'movie', '配信', '動画'],
-    reference: ['wiki', 'reference', 'documentation', 'guide', 'faq', 'ヘルプ'],
-    developer: ['code', 'developer', 'api', 'github', 'プログラミング', '技術'],
-    entertainment: ['music', 'game', 'anime', '漫画', 'entertainment', 'ライブ'],
-    finance: ['stock', 'market', 'finance', 'bank', '投資', '金融']
-  };
-
   const haystack = `${title || ''} ${bodyText || ''}`.toLowerCase();
   let matchedCategory = 'other';
   let maxMatches = 0;
@@ -378,6 +380,144 @@ function buildVisualTrendDescription({
   }
 
   return trendParts.join(' ');
+}
+
+async function loadOpenAiApiKey() {
+  try {
+    const storage = await browserApi.storage.local.get({ [OPENAI_KEY_STORAGE_KEY]: null });
+    return storage[OPENAI_KEY_STORAGE_KEY];
+  } catch (error) {
+    logger.warn('Failed to load OpenAI API key', error);
+    return null;
+  }
+}
+
+function extractOpenAiResponseText(result) {
+  if (!result) {
+    return '';
+  }
+
+  if (Array.isArray(result.output)) {
+    for (const outputPart of result.output) {
+      if (!outputPart?.content) {
+        continue;
+      }
+      for (const contentPart of outputPart.content) {
+        if (typeof contentPart?.text === 'string' && contentPart.text.trim()) {
+          return contentPart.text.trim();
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(result.choices)) {
+    for (const choice of result.choices) {
+      const message = choice?.message?.content;
+      if (typeof message === 'string' && message.trim()) {
+        return message.trim();
+      }
+    }
+  }
+
+  return '';
+}
+
+function parseCategoryFromResponseText(text) {
+  if (!text) {
+    return null;
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed.category === 'string') {
+        const normalized = parsed.category.toLowerCase();
+        if (CATEGORY_NAMES.includes(normalized)) {
+          return normalized;
+        }
+      }
+    } catch (error) {
+      logger.debug('Unable to parse category JSON', error);
+    }
+  }
+
+  const attributeMatch = trimmed.match(/category\s*[:=]\s*["']?([a-z]+)["']?/i);
+  if (attributeMatch && CATEGORY_NAMES.includes(attributeMatch[1].toLowerCase())) {
+    return attributeMatch[1].toLowerCase();
+  }
+
+  const directMatch = CATEGORY_NAMES.find((name) => trimmed.toLowerCase().includes(name));
+  if (directMatch) {
+    return directMatch;
+  }
+
+  const firstToken = trimmed.split(/\s+/)[0].toLowerCase().replace(/[^a-z]/g, '');
+  if (CATEGORY_NAMES.includes(firstToken)) {
+    return firstToken;
+  }
+
+  const regex = new RegExp(`\\b(${CATEGORY_NAMES.join('|')})\\b`, 'i');
+  const regexMatch = trimmed.match(regex);
+  if (regexMatch) {
+    return regexMatch[1].toLowerCase();
+  }
+
+  return null;
+}
+
+async function classifyHistoryEntryCategory({ title, bodyText, visualTrend, layoutHighlights }, apiKey) {
+  if (!apiKey) {
+    return null;
+  }
+
+  const truncatedBody = truncateText(bodyText || '', 1200);
+  const visualTrendSummary = visualTrend || '情報なし';
+  const layoutHighlightsSummary = layoutHighlights || '情報なし';
+  const prompt = `このページのカテゴリを次のいずれかから最もふさわしいものを1つ選んでください: ${CATEGORY_NAMES.join(
+    ', '
+  )}。JSON形式で{"category":"選んだカテゴリ"}として返し、必要なら短い説明を続けてください。ページ情報:\nタイトル: ${title ||
+    '不明'}\nヒューリスティック要約: ${visualTrendSummary}\nレイアウト情報: ${layoutHighlightsSummary}\n本文抜粋: ${truncatedBody}`;
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL_NAME,
+        input: [
+          {
+            role: 'system',
+            content:
+              'You are a personalization assistant. Always pick a single predefined category keyword and explain why the page belongs there.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        max_output_tokens: 150
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI request failed with status ${response.status}`);
+    }
+
+    const result = await response.json();
+    const text = extractOpenAiResponseText(result);
+    return parseCategoryFromResponseText(text);
+  } catch (error) {
+    logger.warn('OpenAI history categorization failed', error);
+    return null;
+  }
 }
 
 async function analyzeHistoryEntry(historyItem) {
@@ -439,7 +579,12 @@ async function analyzeHistoryEntry(historyItem) {
   });
 
   const layoutHighlights = summarizeStructureMetrics(documentMetrics);
-  const category = detectCategoryFromText(title, bodyText);
+  const openAiKey = await loadOpenAiApiKey();
+  const aiCategory = await classifyHistoryEntryCategory(
+    { title, bodyText, visualTrend, layoutHighlights },
+    openAiKey
+  );
+  const category = aiCategory || detectCategoryFromText(title, bodyText);
 
   let llmSummary;
   try {
@@ -448,7 +593,7 @@ async function analyzeHistoryEntry(historyItem) {
       bodyText,
       visualTrend,
       layoutHighlights
-    });
+    }, openAiKey);
   } catch (error) {
     logger.warn('LLM summary failed for history entry', url, error);
   }
@@ -473,23 +618,16 @@ async function analyzeHistoryEntry(historyItem) {
   await savePageFeature(record);
 }
 
-async function runGpt5VisualSummary({ title, bodyText, visualTrend, layoutHighlights }) {
-  let apiKey;
-  try {
-    const storage = await browserApi.storage.local.get({ [OPENAI_KEY_STORAGE_KEY]: null });
-    apiKey = storage[OPENAI_KEY_STORAGE_KEY];
-  } catch (error) {
-    logger.warn('Failed to load OpenAI API key', error);
-  }
-
-  if (!apiKey) {
+async function runGpt5VisualSummary({ title, bodyText, visualTrend, layoutHighlights }, apiKey) {
+  const key = apiKey || (await loadOpenAiApiKey());
+  if (!key) {
     return null;
   }
 
   const prompt = `以下のページ情報から、画面全体の傾向を150文字以内で要約してください。\n` +
     `タイトル: ${title || '不明'}\n` +
-    `ヒューリスティック要約: ${visualTrend}\n` +
-    `レイアウト情報: ${layoutHighlights}\n` +
+    `ヒューリスティック要約: ${visualTrend || '情報なし'}\n` +
+    `レイアウト情報: ${layoutHighlights || '情報なし'}\n` +
     `本文抜粋: ${truncateText(bodyText || '', 800)}`;
 
   try {
@@ -497,12 +635,15 @@ async function runGpt5VisualSummary({ title, bodyText, visualTrend, layoutHighli
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
+        Authorization: `Bearer ${key}`
       },
       body: JSON.stringify({
         model: OPENAI_MODEL_NAME,
         input: [
-          { role: 'system', content: 'You are a UX trend analyst who summarizes visual and layout characteristics for personalization systems.' },
+          {
+            role: 'system',
+            content: 'You are a UX trend analyst who summarizes visual and layout characteristics for personalization systems.'
+          },
           { role: 'user', content: prompt }
         ],
         max_output_tokens: 300
@@ -514,7 +655,7 @@ async function runGpt5VisualSummary({ title, bodyText, visualTrend, layoutHighli
     }
 
     const result = await response.json();
-    const text = result.output?.[0]?.content?.[0]?.text || result.choices?.[0]?.message?.content || '';
+    const text = extractOpenAiResponseText(result);
 
     if (!text) {
       return null;
@@ -526,6 +667,143 @@ async function runGpt5VisualSummary({ title, bodyText, visualTrend, layoutHighli
     };
   } catch (error) {
     logger.warn('OpenAI visual summary failed', error);
+    return null;
+  }
+}
+
+async function gatherHistoryProfileSummary(limit = 5) {
+  const storage = await browserApi.storage.local.get({
+    [PAGE_STATS_KEY]: {},
+    [PAGE_PREFERENCES_KEY]: {}
+  });
+
+  const stats = storage[PAGE_STATS_KEY];
+  const preferences = storage[PAGE_PREFERENCES_KEY];
+  const entries = Object.entries(stats)
+    .map(([origin, meta]) => ({
+      origin,
+      visits: Number.isFinite(meta?.visits) ? meta.visits : 0,
+      lastAction: meta?.lastInteraction?.type || '未収集',
+      preferredColor: preferences[origin]?.highlightColor || '―'
+    }))
+    .sort((a, b) => b.visits - a.visits)
+    .slice(0, limit);
+
+  if (entries.length === 0) {
+    return '履歴データが存在しません。';
+  }
+
+  return entries
+    .map(
+      (entry, index) =>
+        `${index + 1}. ${entry.origin} — 訪問回数: ${entry.visits}、好みの色: ${entry.preferredColor}、最終操作: ${entry.lastAction}`
+    )
+    .join('\n');
+}
+
+function parseToolbarCustomizationFromResponseText(text) {
+  if (!text) {
+    return null;
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed && typeof parsed.highlightColor === 'string') {
+        return {
+          highlightColor: parsed.highlightColor.trim().toLowerCase(),
+          notes: typeof parsed.notes === 'string' ? parsed.notes.trim() : parsed.reason || ''
+        };
+      }
+    } catch (error) {
+      logger.debug('Unable to parse customization JSON', error);
+    }
+  }
+
+  const hexMatch = trimmed.match(/#[0-9a-f]{3,6}\b/i);
+  if (hexMatch) {
+    return {
+      highlightColor: hexMatch[0].toLowerCase(),
+      notes: ''
+    };
+  }
+
+  return null;
+}
+
+async function runGpt5ToolbarCustomization({ pageSnapshot, historySummary }, apiKey) {
+  const key = apiKey || (await loadOpenAiApiKey());
+  if (!key) {
+    return null;
+  }
+
+  const metrics = pageSnapshot.metrics || {};
+  const metricLines = [
+    `Dominant color: ${metrics.dominantColor || '不明'}`,
+    `Primary font: ${metrics.primaryFont || '不明'}`,
+    `Base font size: ${metrics.baseFontSize || '不明'}`,
+    typeof metrics.textDensity === 'number'
+      ? `Text density: ${(metrics.textDensity * 100).toFixed(1)}%`
+      : 'Text density: 不明',
+    `Images: ${typeof metrics.imageCount === 'number' ? metrics.imageCount : '不明'}`,
+    `Paragraphs: ${typeof metrics.paragraphCount === 'number' ? metrics.paragraphCount : '不明'}`
+  ];
+
+  const prompt = `あなたはパーソナライズ拡張の視覚修正アドバイザーです。次の情報をもとに、現在のページで使うべきハイライトカラーを選び、簡単に理由を添えてJSONで返してください。JSONは{"highlightColor":"#rrggbb","notes":"..."}という形にしてください。
+ページタイトル: ${pageSnapshot.title || '不明'}
+カテゴリ: ${pageSnapshot.category || '不明'}
+ビジュアル傾向: ${pageSnapshot.visualTrend || '不明'}
+レイアウト情報: ${pageSnapshot.layoutHighlights || '不明'}
+メトリクス:
+${metricLines.join('\n')}
+ビューポート要約: ${pageSnapshot.viewportSummary || 'なし'}
+ユーザーの過去の傾向:
+${historySummary || 'データなし'}
+`;
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL_NAME,
+        input: [
+          {
+            role: 'system',
+            content: 'You are a UX personalization strategist. Pick one highlight color and explain why it fits.'
+          },
+          { role: 'user', content: prompt }
+        ],
+        max_output_tokens: 200
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI request failed with status ${response.status}`);
+    }
+
+    const result = await response.json();
+    const text = extractOpenAiResponseText(result);
+    const customization = parseToolbarCustomizationFromResponseText(text);
+    if (!customization) {
+      return null;
+    }
+
+    return {
+      customization,
+      raw: JSON.stringify(result)
+    };
+  } catch (error) {
+    logger.warn('OpenAI toolbar customization failed', error);
     return null;
   }
 }
@@ -612,6 +890,24 @@ async function handlePageAnalysis(analysis) {
     }
   })();
 
+  const openAiKey = await loadOpenAiApiKey();
+  let llmSummary = null;
+  if (openAiKey) {
+    try {
+      llmSummary = await runGpt5VisualSummary(
+        {
+          title: sanitized.title,
+          bodyText: sanitized.textSample,
+          visualTrend: sanitized.visualTrend,
+          layoutHighlights: sanitized.layoutHighlights
+        },
+        openAiKey
+      );
+    } catch (error) {
+      logger.warn('LLM visual summary failed for live page', sanitized.url, error);
+    }
+  }
+
   const record = {
     id: sanitized.id,
     url: sanitized.url,
@@ -619,17 +915,87 @@ async function handlePageAnalysis(analysis) {
     source: sanitized.source,
     title: sanitized.title,
     extractedAt: sanitized.extractedAt,
-    visualTrend: sanitized.visualTrend,
+    visualTrend: llmSummary?.visualTrend || sanitized.visualTrend,
     layoutHighlights: sanitized.layoutHighlights,
     category: sanitized.category,
     textSample: sanitized.textSample,
     viewportSummary: sanitized.viewportSummary,
     context: sanitized.context,
-    rawLLMResponse: sanitized.rawLLMResponse
+    rawLLMResponse: llmSummary?.raw || sanitized.rawLLMResponse
   };
 
   logger.info('Persisting page analysis', { url: record.url, source: record.source, category: record.category });
   await savePageFeature(record);
+}
+
+function derivePageKeyForPreferences(url) {
+  try {
+    return new URL(url).origin;
+  } catch (error) {
+    logger.warn('Unable to derive preference key for toolbar personalization', url, error);
+    return url || 'unknown';
+  }
+}
+
+async function getPreferencesForUrl(url) {
+  const storage = await browserApi.storage.local.get({ [PAGE_PREFERENCES_KEY]: {} });
+  const pageKey = derivePageKeyForPreferences(url);
+  return storage[PAGE_PREFERENCES_KEY][pageKey] || null;
+}
+
+async function requestPageSnapshot(tabId) {
+  try {
+    const response = await browserApi.tabs.sendMessage(tabId, { type: 'REQUEST_PAGE_SNAPSHOT' });
+    return response?.snapshot || null;
+  } catch (error) {
+    logger.warn('Page snapshot request failed', tabId, error);
+    return null;
+  }
+}
+
+async function sendToolbarPersonalization(tab) {
+  if (!tab || typeof tab.id !== 'number') {
+    return;
+  }
+
+  const preferences = await getPreferencesForUrl(tab.url || '');
+  const historySummary = await gatherHistoryProfileSummary();
+  const pageSnapshot = await requestPageSnapshot(tab.id);
+  let customizationResult = null;
+
+  const openAiKey = await loadOpenAiApiKey();
+  if (pageSnapshot && openAiKey) {
+    try {
+      customizationResult = await runGpt5ToolbarCustomization(
+        { pageSnapshot, historySummary },
+        openAiKey
+      );
+    } catch (error) {
+      logger.warn('Toolbar customization LLM failed', tab.url, error);
+    }
+  }
+
+  const payload = {
+    type: 'APPLY_PERSONALIZATION_NOW',
+    preferences,
+    customization: customizationResult?.customization,
+    customizationHistory: historySummary
+  };
+
+  if (customizationResult?.raw) {
+    payload.customizationRaw = customizationResult.raw;
+  }
+
+  try {
+    await browserApi.tabs.sendMessage(tab.id, payload);
+    logger.info('Toolbar customization dispatched', {
+      tabId: tab.id,
+      url: tab.url,
+      customization: customizationResult?.customization
+    });
+  } catch (error) {
+    logger.warn('Failed to send toolbar personalization message', tab?.url, error);
+  }
 }
 
 async function recordInteraction(action) {
@@ -858,3 +1224,10 @@ browserApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     enqueueTask(item, { persist: false });
   }
 })();
+
+const toolbarActionApi = browserApi.browserAction || browserApi.action;
+if (toolbarActionApi?.onClicked) {
+  toolbarActionApi.onClicked.addListener((tab) => {
+    sendToolbarPersonalization(tab);
+  });
+}
