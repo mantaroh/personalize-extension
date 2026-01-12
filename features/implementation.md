@@ -1,9 +1,9 @@
 # 未実装項目メモ
 
-## 設定オプション
+## 設定オプション（実装済み）
 - OpenAI API キーの設定 UI
   - 例: 拡張のオプション画面（`chrome.runtime.openOptionsPage`）から入力できるフォーム
-  - 保存先: `chrome.storage.local` の専用キー（ハードコードされたキー名は除去）
+  - 保存先: `chrome.storage.local` の専用キー
 - デバッグログの切り替え UI
   - 例: オプション画面にトグル or ツールバーアクションのコンテキストメニュー
   - `personalizeDebugMode` の ON/OFF を切り替える
