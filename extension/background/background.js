@@ -808,6 +808,251 @@ ${historySummary || 'データなし'}
   }
 }
 
+function extractJsonObject(text) {
+  if (!text) {
+    return null;
+  }
+
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(match[0]);
+  } catch (error) {
+    logger.debug('Unable to parse JSON object', error);
+    return null;
+  }
+}
+
+async function getAllFromIndex(storeName, indexName, key) {
+  // IndexedDB の index 取得はイベント駆動なので Promise に包んで await で使える形にする
+  return withStore(storeName, 'readonly', (store) => new Promise((resolve, reject) => {
+    const index = store.index(indexName);
+    const request = index.getAll(key);
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  }));
+}
+
+async function getSimilarHistoryEntries(category, currentUrl, limit = 3) {
+  if (!category) {
+    return [];
+  }
+
+  try {
+    const entries = await getAllFromIndex(PAGE_FEATURE_STORE, 'byCategory', category);
+    return entries
+      .filter((entry) => entry?.url && entry.url !== currentUrl)
+      .sort((a, b) => (b.extractedAt || 0) - (a.extractedAt || 0))
+      .slice(0, limit);
+  } catch (error) {
+    logger.warn('Failed to load similar history entries', category, error);
+    return [];
+  }
+}
+
+function summarizeHistoryEntries(entries) {
+  if (!entries.length) {
+    return '該当履歴なし';
+  }
+
+  return entries
+    .map((entry, index) => {
+      const title = entry.title || entry.url || '不明';
+      const trend = entry.visualTrend || entry.layoutHighlights || '情報なし';
+      return `${index + 1}. ${title} (${entry.category || '不明'}) - ${trend}`;
+    })
+    .join('\n');
+}
+
+async function getRecentInteractionLogs(url, origin, limit = 20) {
+  if (!url && !origin) {
+    return [];
+  }
+
+  const byUrl = url ? await getAllFromIndex(INTERACTION_STORE, 'byUrl', url) : [];
+  if (byUrl.length) {
+    return byUrl.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, limit);
+  }
+
+  if (!origin) {
+    return [];
+  }
+
+  const byOrigin = await getAllFromIndex(INTERACTION_STORE, 'byOrigin', origin);
+  return byOrigin.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, limit);
+}
+
+function buildInteractionSummary(logs) {
+  if (!logs.length) {
+    return '操作ログなし';
+  }
+
+  const summary = {
+    total: logs.length,
+    scrollCount: 0,
+    maxScrollY: 0,
+    clickCount: 0,
+    zoomCount: 0,
+    maxZoom: 1,
+    selectionCount: 0,
+    avgSelectionLength: 0
+  };
+
+  let totalSelectionLength = 0;
+
+  for (const log of logs) {
+    switch (log.actionType) {
+      case 'scroll':
+        summary.scrollCount += 1;
+        summary.maxScrollY = Math.max(summary.maxScrollY, log.meta?.scrollY || 0);
+        break;
+      case 'click':
+        summary.clickCount += 1;
+        break;
+      case 'zoom':
+        summary.zoomCount += 1;
+        summary.maxZoom = Math.max(summary.maxZoom, log.meta?.scale || 1);
+        break;
+      case 'text-selection':
+        summary.selectionCount += 1;
+        totalSelectionLength += log.meta?.length || 0;
+        break;
+      default:
+        break;
+    }
+  }
+
+  summary.avgSelectionLength = summary.selectionCount
+    ? Math.round(totalSelectionLength / summary.selectionCount)
+    : 0;
+
+  return [
+    `総操作数: ${summary.total}`,
+    `スクロール回数: ${summary.scrollCount}`,
+    `最大スクロール: ${summary.maxScrollY}px`,
+    `クリック回数: ${summary.clickCount}`,
+    `ズーム回数: ${summary.zoomCount}`,
+    `最大ズーム: ${summary.maxZoom}`,
+    `選択回数: ${summary.selectionCount}`,
+    `平均選択長: ${summary.avgSelectionLength}文字`
+  ].join(' / ');
+}
+
+async function runGpt5PageCustomizationProposal({ pageSnapshot, historySummary, interactionSummary }, apiKey) {
+  const key = apiKey || (await loadOpenAiApiKey());
+  if (!key) {
+    return null;
+  }
+
+  // AI には分析→類推→提案のステップを明示し、返却フォーマットを固定してパースしやすくする
+  const prompt = `あなたはパーソナライズ拡張のAIエージェントです。\n` +
+    `1. 現在のページを分析\n` +
+    `2. 類似ページ傾向から類推\n` +
+    `3. 操作ログから変更方針を提案\n` +
+    `以下の情報に基づき、JSONで返答してください。\n` +
+    `フォーマット: {\"proposal\":\"...\",\"rationale\":\"...\",\"changePlan\":[\"...\"]}\n` +
+    `ページタイトル: ${pageSnapshot.title || '不明'}\n` +
+    `カテゴリ: ${pageSnapshot.category || '不明'}\n` +
+    `ビジュアル傾向: ${pageSnapshot.visualTrend || '不明'}\n` +
+    `レイアウト情報: ${pageSnapshot.layoutHighlights || '不明'}\n` +
+    `スタイル要約: ${pageSnapshot.styleSummary || '不明'}\n` +
+    `ビューポート要約: ${pageSnapshot.viewportSummary || '不明'}\n` +
+    `類似ページ履歴:\n${historySummary}\n` +
+    `操作ログ要約:\n${interactionSummary}\n`;
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL_NAME,
+        input: [
+          {
+            role: 'system',
+            content: 'You are a UX personalization agent. Provide a concise proposal and rationale.'
+          },
+          { role: 'user', content: prompt }
+        ],
+        max_output_tokens: 300
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI request failed with status ${response.status}`);
+    }
+
+    const result = await response.json();
+    const text = extractOpenAiResponseText(result);
+    const parsed = extractJsonObject(text);
+    if (!parsed) {
+      return null;
+    }
+
+    return {
+      proposal: typeof parsed.proposal === 'string' ? parsed.proposal.trim() : '',
+      rationale: typeof parsed.rationale === 'string' ? parsed.rationale.trim() : '',
+      changePlan: Array.isArray(parsed.changePlan) ? parsed.changePlan : [],
+      raw: JSON.stringify(result)
+    };
+  } catch (error) {
+    logger.warn('OpenAI page proposal failed', error);
+    return null;
+  }
+}
+
+async function runGpt5PageCss({ pageSnapshot, proposal }, apiKey) {
+  const key = apiKey || (await loadOpenAiApiKey());
+  if (!key) {
+    return null;
+  }
+
+  // CSSのみ返させて危険な構文を避けることで、適用時の安全性を担保する
+  const prompt = `次のページに対し、提案に沿ったCSSのみを出力してください。\n` +
+    `制約: @importは禁止。bodyやmain、section、h1-h3、p、a、buttonなど一般的な要素へのスタイル変更のみ。` +
+    `display:noneで主要コンテンツを隠さない。\n` +
+    `提案: ${proposal || '不明'}\n` +
+    `HTML抜粋:\n${pageSnapshot.domSnippet || 'なし'}\n` +
+    `現在のスタイル要約:\n${pageSnapshot.styleSummary || '不明'}\n`;
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL_NAME,
+        input: [
+          {
+            role: 'system',
+            content: 'You generate safe CSS overrides to personalize a page. Output CSS only.'
+          },
+          { role: 'user', content: prompt }
+        ],
+        max_output_tokens: 400
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI request failed with status ${response.status}`);
+    }
+
+    const result = await response.json();
+    const text = extractOpenAiResponseText(result);
+    return text || null;
+  } catch (error) {
+    logger.warn('OpenAI page CSS generation failed', error);
+    return null;
+  }
+}
+
 async function analyzeRecentHistory() {
   if (!browserApi.history || typeof browserApi.history.search !== 'function') {
     logger.warn('History API unavailable');
@@ -995,6 +1240,67 @@ async function sendToolbarPersonalization(tab) {
     });
   } catch (error) {
     logger.warn('Failed to send toolbar personalization message', tab?.url, error);
+  }
+}
+
+async function sendPagePersonalization(tab) {
+  // ページ解析・履歴・操作ログから提案を作り、CSS生成まで行って適用を指示する
+  if (!tab || typeof tab.id !== 'number') {
+    return;
+  }
+
+  const pageSnapshot = await requestPageSnapshot(tab.id);
+  if (!pageSnapshot) {
+    logger.warn('No page snapshot available for personalization', tab.url);
+    return;
+  }
+
+  const origin = (() => {
+    try {
+      return new URL(pageSnapshot.url || tab.url || '').origin;
+    } catch (error) {
+      return pageSnapshot.url || tab.url || '';
+    }
+  })();
+
+  const similarEntries = await getSimilarHistoryEntries(pageSnapshot.category, pageSnapshot.url);
+  const historySummary = summarizeHistoryEntries(similarEntries);
+  const interactionLogs = await getRecentInteractionLogs(pageSnapshot.url, origin);
+  const interactionSummary = buildInteractionSummary(interactionLogs);
+
+  const apiKey = await loadOpenAiApiKey();
+  if (!apiKey) {
+    logger.warn('OpenAI API key missing, skipping page personalization');
+    return;
+  }
+
+  const proposalResult = await runGpt5PageCustomizationProposal(
+    { pageSnapshot, historySummary, interactionSummary },
+    apiKey
+  );
+  if (!proposalResult?.proposal) {
+    logger.warn('No proposal generated for page personalization');
+    return;
+  }
+
+  const cssText = await runGpt5PageCss({ pageSnapshot, proposal: proposalResult.proposal }, apiKey);
+  if (!cssText) {
+    logger.warn('No CSS generated for page personalization');
+    return;
+  }
+
+  try {
+    await browserApi.tabs.sendMessage(tab.id, {
+      type: 'APPLY_PAGE_PERSONALIZATION',
+      css: cssText,
+      proposal: proposalResult.proposal,
+      rationale: proposalResult.rationale,
+      historySummary,
+      interactionSummary
+    });
+    logger.info('Page personalization applied', { tabId: tab.id, url: tab.url });
+  } catch (error) {
+    logger.warn('Failed to send page personalization', tab.url, error);
   }
 }
 
@@ -1229,5 +1535,6 @@ const toolbarActionApi = browserApi.browserAction || browserApi.action;
 if (toolbarActionApi?.onClicked) {
   toolbarActionApi.onClicked.addListener((tab) => {
     sendToolbarPersonalization(tab);
+    sendPagePersonalization(tab);
   });
 }
