@@ -11,36 +11,6 @@ const elements = {
   debugStatus: document.getElementById('debug-status')
 };
 
-function readLocalSetting(key, fallback = '') {
-  try {
-    const stored = localStorage.getItem(key);
-    return stored ?? fallback;
-  } catch (error) {
-    console.warn('[personalize] Failed to read localStorage', error);
-    return fallback;
-  }
-}
-
-function writeLocalSetting(key, value) {
-  try {
-    localStorage.setItem(key, value);
-  } catch (error) {
-    console.warn('[personalize] Failed to write localStorage', error);
-  }
-}
-
-async function syncSettingToExtensionStorage(key, value) {
-  if (!browserApi.storage?.local) {
-    return;
-  }
-
-  try {
-    await browserApi.storage.local.set({ [key]: value });
-  } catch (error) {
-    console.warn('[personalize] Failed to sync setting to storage', error);
-  }
-}
-
 function setStatus(element, message, isError = false) {
   if (!element) {
     return;
@@ -50,15 +20,38 @@ function setStatus(element, message, isError = false) {
   element.classList.toggle('error', isError);
 }
 
-function loadSettings() {
-  const apiKey = readLocalSetting(OPENAI_KEY_STORAGE_KEY, '');
-  elements.openAiKey.value = apiKey;
+async function loadSettings() {
+  if (!browserApi.storage?.local) {
+    setStatus(elements.keyStatus, 'ブラウザのストレージにアクセスできません。', true);
+    setStatus(elements.debugStatus, 'ブラウザのストレージにアクセスできません。', true);
+    if (elements.saveKey) {
+      elements.saveKey.disabled = true;
+    }
+    if (elements.openAiKey) {
+      elements.openAiKey.disabled = true;
+    }
+    if (elements.debugMode) {
+      elements.debugMode.disabled = true;
+    }
+    return;
+  }
 
-  const debugStored = readLocalSetting(DEBUG_MODE_KEY, 'false');
-  const debugEnabled = debugStored === 'true';
-  elements.debugMode.checked = debugEnabled;
-  if (debugEnabled) {
-    setStatus(elements.debugStatus, 'デバッグログが有効です。');
+  try {
+    const stored = await browserApi.storage.local.get({
+      [OPENAI_KEY_STORAGE_KEY]: '',
+      [DEBUG_MODE_KEY]: false
+    });
+
+    elements.openAiKey.value = stored[OPENAI_KEY_STORAGE_KEY] ?? '';
+    const debugEnabled = Boolean(stored[DEBUG_MODE_KEY]);
+    elements.debugMode.checked = debugEnabled;
+    if (debugEnabled) {
+      setStatus(elements.debugStatus, 'デバッグログが有効です。');
+    }
+  } catch (error) {
+    console.warn('[personalize] Failed to load settings', error);
+    setStatus(elements.keyStatus, '設定の読み込みに失敗しました。', true);
+    setStatus(elements.debugStatus, '設定の読み込みに失敗しました。', true);
   }
 }
 
@@ -72,20 +65,30 @@ async function handleSaveApiKey() {
     return;
   }
 
-  writeLocalSetting(OPENAI_KEY_STORAGE_KEY, value);
-  await syncSettingToExtensionStorage(OPENAI_KEY_STORAGE_KEY, value);
-  setStatus(elements.keyStatus, 'API キーを保存しました。');
-  elements.saveKey.disabled = false;
+  try {
+    await browserApi.storage.local.set({ [OPENAI_KEY_STORAGE_KEY]: value });
+    setStatus(elements.keyStatus, 'API キーを保存しました。');
+  } catch (error) {
+    console.warn('[personalize] Failed to save API key', error);
+    setStatus(elements.keyStatus, 'API キーの保存に失敗しました。', true);
+  } finally {
+    elements.saveKey.disabled = false;
+  }
 }
 
 async function handleDebugToggle(event) {
   const enabled = event.target.checked;
-  writeLocalSetting(DEBUG_MODE_KEY, String(enabled));
-  await syncSettingToExtensionStorage(DEBUG_MODE_KEY, enabled);
-  setStatus(elements.debugStatus, enabled ? 'デバッグログが有効です。' : 'デバッグログを無効にしました。');
+  try {
+    await browserApi.storage.local.set({ [DEBUG_MODE_KEY]: enabled });
+    setStatus(elements.debugStatus, enabled ? 'デバッグログが有効です。' : 'デバッグログを無効にしました。');
+  } catch (error) {
+    console.warn('[personalize] Failed to update debug mode', error);
+    setStatus(elements.debugStatus, 'デバッグログの更新に失敗しました。', true);
+    event.target.checked = !enabled;
+  }
 }
 
-loadSettings();
+void loadSettings();
 
 if (elements.saveKey) {
   elements.saveKey.addEventListener('click', handleSaveApiKey);
