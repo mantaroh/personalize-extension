@@ -11,6 +11,8 @@ const PAGE_FEATURE_STORE = 'pageFeatures';
 const INTERACTION_STORE = 'interactionLogs';
 const OPENAI_KEY_STORAGE_KEY = 'personalizeOpenAiApiKey';
 const OPENAI_MODEL_NAME = 'gpt-5.0-multimodal-preview';
+const PERSONALIZE_MENU_ID = 'personalize-apply-visual-change';
+const PERSONALIZE_MENU_TITLE = 'ページの見た目をパーソナライズ';
 
 const taskQueue = [];
 let processing = false;
@@ -67,6 +69,38 @@ if (browserApi.storage?.onChanged) {
       logger.setDebugMode(changes[DEBUG_MODE_KEY]?.newValue);
     }
   });
+}
+
+function registerContextMenu() {
+  if (!browserApi.contextMenus) {
+    logger.debug('Context menus API unavailable');
+    return;
+  }
+
+  try {
+    browserApi.contextMenus.remove(PERSONALIZE_MENU_ID, () => {
+      if (browserApi.runtime?.lastError) {
+        logger.debug('Context menu remove skipped', browserApi.runtime.lastError.message);
+      }
+
+      browserApi.contextMenus.create(
+        {
+          id: PERSONALIZE_MENU_ID,
+          title: PERSONALIZE_MENU_TITLE,
+          contexts: ['page', 'action']
+        },
+        () => {
+          if (browserApi.runtime?.lastError) {
+            logger.warn('Failed to register context menu', browserApi.runtime.lastError.message);
+          } else {
+            logger.info('Context menu registered');
+          }
+        }
+      );
+    });
+  } catch (error) {
+    logger.warn('Context menu registration threw error', error);
+  }
 }
 
 function openDatabase() {
@@ -1443,11 +1477,13 @@ async function handleHistorySync() {
 browserApi.runtime.onInstalled.addListener(() => {
   browserApi.alarms.create('history-sync', { periodInMinutes: 5 });
   enqueueTask({ type: 'SYNC_HISTORY' });
+  registerContextMenu();
 });
 
 if (browserApi.runtime.onStartup) {
   browserApi.runtime.onStartup.addListener(() => {
     enqueueTask({ type: 'SYNC_HISTORY' });
+    registerContextMenu();
   });
 }
 
@@ -1535,6 +1571,15 @@ const toolbarActionApi = browserApi.browserAction || browserApi.action;
 if (toolbarActionApi?.onClicked) {
   toolbarActionApi.onClicked.addListener((tab) => {
     sendToolbarPersonalization(tab);
+    sendPagePersonalization(tab);
+  });
+}
+
+if (browserApi.contextMenus?.onClicked) {
+  browserApi.contextMenus.onClicked.addListener((info, tab) => {
+    if (info.menuItemId !== PERSONALIZE_MENU_ID) {
+      return;
+    }
     sendPagePersonalization(tab);
   });
 }

@@ -6,7 +6,7 @@
   "background": {
     "service_worker": "background/background.js"
   },
-  "permissions": ["storage", "alarms", "history"],
+  "permissions": ["storage", "alarms", "history", "contextMenus"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "Personalize page",
