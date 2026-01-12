@@ -9,7 +9,7 @@ const DATABASE_NAME = 'personalize-extension';
 const DATABASE_VERSION = 1;
 const PAGE_FEATURE_STORE = 'pageFeatures';
 const INTERACTION_STORE = 'interactionLogs';
-const OPENAI_KEY_STORAGE_KEY = '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';
+const OPENAI_KEY_STORAGE_KEY = 'personalizeOpenAiApiKey';
 const OPENAI_MODEL_NAME = 'gpt-5.0-multimodal-preview';
 
 const taskQueue = [];
