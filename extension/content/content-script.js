@@ -39,6 +39,8 @@ const debugState = {
 };
 
 let debugIndicator;
+let personalizationStyle;
+let personalizationOverlay;
 
 function ensureDebugIndicator() {
   if (!debugState.enabled || debugIndicator) {
@@ -307,6 +309,87 @@ if (window.top === window.self) {
     }
   }
 
+  function sanitizeCssText(cssText) {
+    if (typeof cssText !== 'string') {
+      return '';
+    }
+
+    const trimmed = cssText.trim();
+    if (!trimmed) {
+      return '';
+    }
+
+    // 過剰なCSSはページへの影響が大きいため、一定長で制限する
+    if (trimmed.length > 8000) {
+      return trimmed.slice(0, 8000);
+    }
+
+    // 外部読み込みは予期せぬ副作用が出るので拒否する
+    if (trimmed.includes('@import')) {
+      return '';
+    }
+
+    return trimmed;
+  }
+
+  function applyPersonalizationCss(cssText) {
+    const sanitized = sanitizeCssText(cssText);
+    if (!sanitized) {
+      return false;
+    }
+
+    // 拡張が適用したスタイルを識別できるよう専用タグで管理する
+    if (!personalizationStyle) {
+      personalizationStyle = document.createElement('style');
+      personalizationStyle.setAttribute('data-personalize-style', 'true');
+      document.head.appendChild(personalizationStyle);
+    }
+
+    personalizationStyle.textContent = sanitized;
+    return true;
+  }
+
+  function showPersonalizationOverlay({ proposal, rationale }) {
+    if (!proposal && !rationale) {
+      return;
+    }
+
+    if (!document.body) {
+      return;
+    }
+
+    if (!personalizationOverlay) {
+      personalizationOverlay = document.createElement('div');
+      personalizationOverlay.setAttribute('data-personalize-overlay', 'true');
+      Object.assign(personalizationOverlay.style, {
+        position: 'fixed',
+        bottom: '16px',
+        right: '16px',
+        maxWidth: '320px',
+        backgroundColor: 'rgba(15, 23, 42, 0.9)',
+        color: '#f8fafc',
+        padding: '12px 14px',
+        borderRadius: '10px',
+        fontSize: '12px',
+        fontFamily: 'system-ui, sans-serif',
+        zIndex: 2147483647,
+        lineHeight: '1.5',
+        boxShadow: '0 8px 20px rgba(15, 23, 42, 0.4)'
+      });
+      document.body.appendChild(personalizationOverlay);
+    }
+
+    const lines = [];
+    if (proposal) {
+      lines.push(`提案: ${proposal}`);
+    }
+    if (rationale) {
+      lines.push(`理由: ${rationale}`);
+    }
+
+    personalizationOverlay.textContent = lines.join('\n');
+  }
+
   function extractViewportTextSample() {
     const points = [0.25, 0.5, 0.75];
     const snippets = [];
@@ -400,8 +483,46 @@ if (window.top === window.self) {
       visualTrend: buildVisualTrend(metrics),
       layoutHighlights: buildLayoutHighlights(metrics),
       viewportSummary: extractViewportTextSample(),
-      category: detectCategoryFromDocument(metrics)
+      category: detectCategoryFromDocument(metrics),
+      domSnippet: extractDomSnippet(),
+      styleSummary: buildStyleSummary()
     };
+  }
+
+  function extractDomSnippet() {
+    if (!document.body) {
+      return '';
+    }
+
+    let html = document.body.innerHTML || '';
+    // LLM に渡す抜粋から実行可能なタグは除外して情報漏洩と誤作動を防ぐ
+    html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+    html = html.replace(/<style[\s\S]*?<\/style>/gi, '');
+    html = html.replace(/\s+/g, ' ').trim();
+    return html.slice(0, 3000);
+  }
+
+  function buildStyleSummary() {
+    if (!document.body) {
+      return '';
+    }
+
+    // ページの代表的な見た目を抽出して、変更提案の材料にする
+    const bodyStyle = window.getComputedStyle(document.body);
+    const headline = document.querySelector('h1, h2, h3');
+    const headlineStyle = headline ? window.getComputedStyle(headline) : null;
+    const link = document.querySelector('a');
+    const linkStyle = link ? window.getComputedStyle(link) : null;
+
+    return [
+      `body背景: ${bodyStyle.backgroundColor}`,
+      `body文字色: ${bodyStyle.color}`,
+      `bodyフォント: ${bodyStyle.fontFamily}`,
+      `body文字サイズ: ${bodyStyle.fontSize}`,
+      `body行間: ${bodyStyle.lineHeight}`,
+      headlineStyle ? `見出し色: ${headlineStyle.color}` : '見出し色: 不明',
+      linkStyle ? `リンク色: ${linkStyle.color}` : 'リンク色: 不明'
+    ].join(' / ');
   }
 
   function detectCategoryFromDocument(metrics) {
@@ -608,6 +729,17 @@ if (window.top === window.self) {
       const snapshot = buildCurrentPageSnapshot();
       sendResponse({ snapshot });
       return true;
+    }
+
+    if (message?.type === 'APPLY_PAGE_PERSONALIZATION') {
+      const applied = applyPersonalizationCss(message.css);
+      if (applied) {
+        showPersonalizationOverlay({
+          proposal: message.proposal,
+          rationale: message.rationale
+        });
+      }
+      return;
     }
 
     if (!message || message.type !== 'APPLY_PERSONALIZATION_NOW') {
