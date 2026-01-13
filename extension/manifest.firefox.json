@@ -1,14 +1,13 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 2,
   "name": "Personalize Extension",
   "description": "Async personalization engine capturing browsing behaviour and adapting pages.",
   "version": "0.1.0",
   "background": {
     "scripts": ["background/background.js"]
   },
-  "permissions": ["storage", "alarms", "history", "contextMenus"],
-  "host_permissions": ["<all_urls>"],
-  "action": {
+  "permissions": ["storage", "alarms", "history", "contextMenus", "<all_urls>"],
+  "browser_action": {
     "default_title": "Personalize page",
     "default_icon": {
       "16": "icons/icon.png",
