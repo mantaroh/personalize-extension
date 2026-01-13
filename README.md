@@ -1,6 +1,6 @@
 # パーソナライズブラウザ拡張
 
-このプロジェクトは、閲覧履歴やユーザー操作に応じてウェブページの表示をパーソナライズするブラウザ拡張のベース実装です。Chrome / Firefox の両方で動作する WebExtension を想定しています。
+このプロジェクトは、閲覧履歴やユーザー操作に応じてウェブページの表示をパーソナライズするブラウザ拡張のベース実装です。Chrome / Firefox / Safari の各ブラウザで動作できるように WebExtension を構成しています。
 
 ## ディレクトリ構成
 
@@ -10,7 +10,8 @@ extension/
 │   └── background.js     # 非同期タスクを扱うサービスワーカー
 ├── content/
 │   └── content-script.js # ユーザー操作を監視しページに反映
-└── manifest.json          # 共有マニフェスト
+└── manifest.json          # Chrome / Safari 向けマニフェスト
+└── manifest.firefox.json  # Firefox 一時アドオン向けマニフェスト
 ```
 
 ## 機能概要
@@ -28,7 +29,7 @@ extension/
 
 ### Firefox
 1. Firefox を開き、 `about:debugging#/runtime/this-firefox` を表示します。
-2. 「一時的なアドオンを読み込む」をクリックし、`extension/manifest.json` を指定します。
+2. 「一時的なアドオンを読み込む」をクリックし、`extension/manifest.firefox.json` を指定します。
 
 ## CI で生成された Zip アーカイブの利用手順
 
@@ -45,7 +46,7 @@ CI から配布される Zip ファイルには `manifest.json` を含む `exten
 
 ### Mozilla Firefox
 1. Firefox で `about:debugging#/runtime/this-firefox` を開きます。
-2. 「一時的なアドオンを読み込む」をクリックし、Zip から展開したフォルダ内の `manifest.json` を指定します。
+2. 「一時的なアドオンを読み込む」をクリックし、Zip から展開したフォルダ内の `manifest.firefox.json` を指定します。
 3. 一時アドオンとして読み込まれるため、ブラウザ再起動後に継続利用したい場合は `web-ext` などで署名パッケージ化するか、再度読み込みを実施してください。
 
 ### Microsoft Edge
