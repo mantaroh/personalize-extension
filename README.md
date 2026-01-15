@@ -11,7 +11,7 @@ extension/
 ├── content/
 │   └── content-script.js # ユーザー操作を監視しページに反映
 └── manifest.json          # Chrome / Safari 向けマニフェスト
-└── manifest.firefox.json  # Firefox 一時アドオン向けマニフェスト
+└── manifest.firefox.json  # Firefox 向けマニフェスト
 ```
 
 ## 機能概要
@@ -29,15 +29,22 @@ extension/
 
 ### Firefox
 1. Firefox を開き、 `about:debugging#/runtime/this-firefox` を表示します。
-2. 「一時的なアドオンを読み込む」をクリックし、`extension/manifest.firefox.json` を指定します。
+2. Firefox はマニフェストファイル名が `manifest.json` でないと読み込めないため、Firefox 用にコピーしたフォルダを用意します（例: `cp -R extension extension-firefox`）。
+3. `extension-firefox/manifest.json` を `extension/manifest.firefox.json` で上書きし、`extension-firefox/manifest.firefox.json` は削除します。
+4. 「一時的なアドオンを読み込む」をクリックし、`extension-firefox/manifest.json` を指定します。
+5. それでも `background.service_worker is currently disabled. Add background.scripts.` が出る場合は、以下の手順で原因を切り分けてください。
+   1. `about:debugging#/runtime/this-firefox` で対象アドオンの「詳細」→「マニフェストを表示」を開き、`manifest_version: 2` と `background.scripts` が表示されるか確認します（表示内容が期待と違う場合、別ファイルを読み込んでいます）。
+   2. 同じ画面の「検査」→「アドオンデバッガー」を開き、コンソールに `manifest_version` や `background` に関する警告が出ていないか確認します。
+   3. `about:debugging#/runtime/this-firefox` の「拡張機能のエラー」に、`service_worker` に関するメッセージが出ていないか確認します（どのファイルが原因と出るかを記録してください）。
+   4. `extension-firefox/background/background.js` が読み込み対象のフォルダに存在するか確認し、パスが `background/background.js` と一致しているか確認します。
 
 ## CI で生成された Zip アーカイブの利用手順
 
-CI から配布される Zip ファイルには `manifest.json` を含む `extension/` ディレクトリ一式が格納されています。以下の手順で展開し、ブラウザごとに読み込んでください。
+CI から配布される Zip ファイルは、Chrome / Safari 用と Firefox 用の 2 種類を用意します（Firefox は `manifest.json` というファイル名でしか読み込めないため、`manifest.firefox.json` を `manifest.json` に差し替えたフォルダを別途パッケージ化します）。
 
 ### 事前準備（共通）
-1. CI で生成された Zip ファイルをダウンロードします。
-2. Zip を展開し、`manifest.json` が直下に存在するフォルダ構成のまま保持します（移動や削除を行うと読み込み済みの拡張機能が無効化されるため注意してください）。
+1. Chrome / Safari 用 Zip と Firefox 用 Zip をそれぞれダウンロードします。
+2. Zip を展開し、各フォルダの直下に `manifest.json` がある構成のまま保持します（移動や削除を行うと読み込み済みの拡張機能が無効化されるため注意してください）。
 
 ### Google Chrome
 1. Chrome で `chrome://extensions` を開きます。
@@ -46,7 +53,7 @@ CI から配布される Zip ファイルには `manifest.json` を含む `exten
 
 ### Mozilla Firefox
 1. Firefox で `about:debugging#/runtime/this-firefox` を開きます。
-2. 「一時的なアドオンを読み込む」をクリックし、Zip から展開したフォルダ内の `manifest.firefox.json` を指定します。
+2. 「一時的なアドオンを読み込む」をクリックし、Firefox 用 Zip を展開したフォルダ内の `manifest.json` を指定します。
 3. 一時アドオンとして読み込まれるため、ブラウザ再起動後に継続利用したい場合は `web-ext` などで署名パッケージ化するか、再度読み込みを実施してください。
 
 ### Microsoft Edge
