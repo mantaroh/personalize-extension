@@ -12,13 +12,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create distribution archive
+      - name: Create distribution archives
         run: |
+          mkdir -p dist
           cd extension
-          zip -r ../personalize-extension.zip .
+          zip -r ../dist/personalize-extension-chrome.zip .
+          cd ..
+          rm -rf dist/extension-firefox
+          cp -R extension dist/extension-firefox
+          cp extension/manifest.firefox.json dist/extension-firefox/manifest.json
+          rm dist/extension-firefox/manifest.firefox.json
+          cd dist/extension-firefox
+          zip -r ../personalize-extension-firefox.zip .
+          cd ../..
 
-      - name: Upload packaged extension
+      - name: Upload packaged extensions
         uses: actions/upload-artifact@v4
         with:
           name: personalize-extension
-          path: personalize-extension.zip
+          path: |
+            dist/personalize-extension-chrome.zip
+            dist/personalize-extension-firefox.zip
